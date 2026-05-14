@@ -1,81 +1,70 @@
 import os
 import asyncio
-from pyrogram import Client, filters, enums, compose
-from pyrogram.errors import FloodWait
+from pyrogram import Client, filters, enums
+from pyrogram.errors import FloodWait, AuthKeyUnregistered, RPCError
 
-# Load configurations from Environment Variables
+# Environment Variables
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID")) # Your personal Telegram Account ID for security
+OWNER_ID = int(os.getenv("OWNER_ID"))
 
-# Client 1: The Userbot (Handles the heavy lifting to avoid Bot API limits)
+# Initialize Clients
 userbot = Client("userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
-
-# Client 2: The Deepsikha Control Bot (Your DM interface)
 deepsikha_bot = Client("deepsikha_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Listen ONLY in private DM and ONLY from you
-@deepsikha_bot.on_message(filters.command("banall") & filters.private & filters.user(OWNER_ID))
-async def ban_all_from_dm(client, message):
+@deepsikha_bot.on_message(filters.command("banall") & filters.user(OWNER_ID) & filters.private)
+async def ban_all_logic(client, message):
     if len(message.command) < 2:
-        await message.reply_text("❌ **Usage:** `/banall <chat_id>`\nExample: `/banall -100123456789`")
-        return
+        return await message.reply_text("❌ Provide a Chat ID: `/banall -100...`")
 
     target_chat = message.command[1]
-    
-    # Ensure the chat ID is parsed correctly
-    try:
-        target_chat = int(target_chat) if target_chat.lstrip('-').isdigit() else target_chat
-    except ValueError:
-        pass
-
-    status_msg = await message.reply_text(f"⏳ **Deepsikha is scanning `{target_chat}`... This may take a moment.**")
-    
-    banned = 0
-    failed = 0
+    status = await message.reply_text("⏳ **Connecting to Userbot...**")
 
     try:
-        # The Userbot fetches and bans because standard bots have strict API limits
+        banned = 0
+        # Use Pyrogram v2 async iterator
         async for member in userbot.get_chat_members(target_chat):
-            # Skip group admins and the owner to prevent accidents
             if member.status in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
                 continue
             
             try:
                 await userbot.ban_chat_member(target_chat, member.user.id)
                 banned += 1
+                await asyncio.sleep(0.5) # Anti-Flood
                 
-                # CRITICAL: Delay to protect the session string from getting banned
-                await asyncio.sleep(0.5) 
-                
-                # Update your DM periodically so you know it's working
-                if banned % 25 == 0:
-                    await status_msg.edit_text(f"⏳ **Progress:** Banned `{banned}` members so far...")
-                    
+                if banned % 10 == 0:
+                    await status.edit(f"🔨 Banned `{banned}` users...")
             except FloodWait as e:
                 await asyncio.sleep(e.value)
-                await userbot.ban_chat_member(target_chat, member.user.id)
-                banned += 1
             except Exception:
-                failed += 1
+                continue
 
-        # Final Report sent to your Bot DM
-        await status_msg.edit_text(
-            f"✅ **Mass Ban Task Complete for `{target_chat}`**\n"
-            f"Successfully banned: `{banned}` members\n"
-            f"Failed/Skipped: `{failed}`\n"
-            f"*(Admins were automatically skipped)*"
-        )
-
+        await status.edit(f"✅ **Done!** Banned `{banned}` members in `{target_chat}`.")
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Error:** Could not access chat. Make sure the Userbot is an admin in `{target_chat}`.\nError details: `{e}`")
+        await status.edit(f"❌ **Error:** `{e}`")
 
-async def main():
-    print("Starting Deepsikha Control Bot and Userbot background processor...")
-    # This runs both clients at the exact same time
-    await compose([userbot, deepsikha_bot])
+async def start_services():
+    print("Checking Session Health...")
+    try:
+        await userbot.start()
+        await deepsikha_bot.start()
+        
+        # Verify Userbot is actually logged in
+        me = await userbot.get_me()
+        print(f"✅ Userbot started as: {me.first_name}")
+        print(f"✅ Control Bot is online!")
+        
+        # Keep the script running
+        await asyncio.Event().wait()
+    except AuthKeyUnregistered:
+        print("❌ ERROR: Your SESSION_STRING is expired or revoked! Generate a new one.")
+    except Exception as e:
+        print(f"❌ unexpected Error: {e}")
+    finally:
+        await userbot.stop()
+        await deepsikha_bot.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start_services())

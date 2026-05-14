@@ -1,83 +1,81 @@
 import os
 import asyncio
-from pyrogram import Client, filters
-from pyrogram.enums import ChatMemberStatus
+from pyrogram import Client, filters, enums, compose
 from pyrogram.errors import FloodWait
-from dotenv import load_dotenv
 
-# Load variables from environment
-load_dotenv()
-
+# Load configurations from Environment Variables
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# Make sure to add your personal Telegram User ID to your .env or Railway variables
-OWNER_ID = int(os.getenv("OWNER_ID")) 
+OWNER_ID = int(os.getenv("OWNER_ID")) # Your personal Telegram Account ID for security
 
-# Initialize Bot
-app = Client(
-    "my_telegram_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+# Client 1: The Userbot (Handles the heavy lifting to avoid Bot API limits)
+userbot = Client("userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
-@app.on_message(filters.command("start") & filters.private)
-async def start_command(client, message):
-    await message.reply_text("Hello! The bot is online and successfully deployed.")
+# Client 2: The Deepsikha Control Bot (Your DM interface)
+deepsikha_bot = Client("deepsikha_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# The mass ban command, restricted to the OWNER_ID
-@app.on_message(filters.command("clean") & filters.user(OWNER_ID))
-async def clean_group(client, message):
-    # Check if the group ID was provided
+# Listen ONLY in private DM and ONLY from you
+@deepsikha_bot.on_message(filters.command("banall") & filters.private & filters.user(OWNER_ID))
+async def ban_all_from_dm(client, message):
     if len(message.command) < 2:
-        await message.reply_text("⚠️ **Usage:** `/clean <target_group_id>`\nExample: `/clean -1001234567890`")
+        await message.reply_text("❌ **Usage:** `/banall <chat_id>`\nExample: `/banall -100123456789`")
         return
 
-    try:
-        target_chat_id = int(message.command[1])
-    except ValueError:
-        await message.reply_text("❌ Invalid Group ID format. It should be a number.")
-        return
-
-    status_msg = await message.reply_text(f"⏳ **Starting mass ban in** `{target_chat_id}`...\n*This might take a while depending on group size.*")
+    target_chat = message.command[1]
     
-    banned_count = 0
-    failed_count = 0
+    # Ensure the chat ID is parsed correctly
+    try:
+        target_chat = int(target_chat) if target_chat.lstrip('-').isdigit() else target_chat
+    except ValueError:
+        pass
+
+    status_msg = await message.reply_text(f"⏳ **Deepsikha is scanning `{target_chat}`... This may take a moment.**")
+    
+    banned = 0
+    failed = 0
 
     try:
-        # Fetch members from the target group
-        async for member in client.get_chat_members(target_chat_id):
-            # Skip bots, administrators, and the group creator
-            if member.user.is_bot or member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        # The Userbot fetches and bans because standard bots have strict API limits
+        async for member in userbot.get_chat_members(target_chat):
+            # Skip group admins and the owner to prevent accidents
+            if member.status in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
                 continue
-                
+            
             try:
-                # Ban the user
-                await client.ban_chat_member(target_chat_id, member.user.id)
-                banned_count += 1
+                await userbot.ban_chat_member(target_chat, member.user.id)
+                banned += 1
                 
-                # CRITICAL: Sleep to avoid hitting Telegram API limits
+                # CRITICAL: Delay to protect the session string from getting banned
                 await asyncio.sleep(0.5) 
                 
+                # Update your DM periodically so you know it's working
+                if banned % 25 == 0:
+                    await status_msg.edit_text(f"⏳ **Progress:** Banned `{banned}` members so far...")
+                    
             except FloodWait as e:
-                # If Telegram says "slow down", pause the script for the requested time
-                print(f"Sleeping for {e.value} seconds due to rate limits...")
                 await asyncio.sleep(e.value)
-            except Exception as e:
-                failed_count += 1
-                print(f"Failed to ban user {member.user.id}: {e}")
+                await userbot.ban_chat_member(target_chat, member.user.id)
+                banned += 1
+            except Exception:
+                failed += 1
 
-        # Update the final message once the loop is complete
+        # Final Report sent to your Bot DM
         await status_msg.edit_text(
-            f"✅ **Clean Complete!**\n\n"
-            f"🚫 **Successfully Banned:** {banned_count}\n"
-            f"⚠️ **Failed/Skipped:** {failed_count}"
+            f"✅ **Mass Ban Task Complete for `{target_chat}`**\n"
+            f"Successfully banned: `{banned}` members\n"
+            f"Failed/Skipped: `{failed}`\n"
+            f"*(Admins were automatically skipped)*"
         )
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Error accessing group:**\n`{e}`\n\n*Make sure the bot is an admin in the target group with ban privileges.*")
+        await status_msg.edit_text(f"❌ **Error:** Could not access chat. Make sure the Userbot is an admin in `{target_chat}`.\nError details: `{e}`")
+
+async def main():
+    print("Starting Deepsikha Control Bot and Userbot background processor...")
+    # This runs both clients at the exact same time
+    await compose([userbot, deepsikha_bot])
 
 if __name__ == "__main__":
-    print("Bot is starting up...")
-    app.run()
+    asyncio.run(main())
